@@ -1,0 +1,169 @@
+#!/bin/bash
+
+# Default values for parameters
+SESSION_TIME=900
+INTER_SESSION_TIME=60
+ITERATIONS=30
+
+# NEW default session time variables
+BASELINE_SESSION_TIME=1200
+TRAINING_SESSION_TIME=900
+
+# Timestamp for log files
+TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
+DATE=$(date)
+# Create a logs directory if it doesn't exist
+WORKING_DIR="/home/kazama/Experiment_builds/turning_foraging/${TIMESTAMP}"
+LOG_DIR="$WORKING_DIR/logs"
+RAW_CSV_MAIN_DIR="/home/kazama/Closed_loop_data/turning_foraging"
+mkdir -p "$LOG_DIR"
+mkdir -p "$WORKING_DIR"
+mkdir -p "$RAW_CSV_MAIN_DIR"
+
+# Log file paths
+SCRIPT_LOG="$LOG_DIR/run_experiment_${TIMESTAMP}.log"
+CALC_PATH_LOG="$LOG_DIR/calc_path_${TIMESTAMP}.log"
+CON_LED_LOG="$LOG_DIR/con_led0_${TIMESTAMP}.log"
+FICTRAC_LOG="$LOG_DIR/fictrac_${TIMESTAMP}.log"
+UNITY_BASELINE_LOG="$LOG_DIR/unity_baseline_${TIMESTAMP}.log"
+UNITY_EXPERIMENT_LOG="$LOG_DIR/unity_experiment_${TIMESTAMP}.log"
+
+# Paths to executables
+calc_path_exe="/home/kazama/Experiment_builds/foraging/calc_path.py"
+con_led_exe="/home/kazama/Experiment_builds/foraging/con_led0.py"
+FICTRAC_WORKING_DIR="/home/kazama/fictrac/${TIMESTAMP}"
+FICTRAC_EXE="/home/kazama/fictrac/bin/fictrac"
+FICTRAC_CONFIG="/home/kazama/fictrac/fictrac_config/config.txt"
+UNITY_EXE="/home/kazama/Unity_Builds/turning_foraging/turning_foraging.x86_64" #undone
+
+# Create the FicTrac working directory
+mkdir -p "$FICTRAC_WORKING_DIR"
+
+# Track background process IDs to ensure they are terminated on exit
+PIDS=()
+
+# Function to terminate all processes when the script exits
+cleanup() {
+    echo "Terminating all running processes..." | tee -a "$SCRIPT_LOG"
+    for pid in "${PIDS[@]}"; do
+        if kill -0 "$pid" 2>/dev/null; then
+            echo "Killing process with PID $pid" | tee -a "$SCRIPT_LOG"
+            kill -9 "$pid" 2>/dev/null
+        fi
+    done
+    echo "All processes terminated." | tee -a "$SCRIPT_LOG"
+}
+
+# Set trap to handle all exit scenarios
+trap cleanup EXIT
+
+# Parse command-line arguments
+while [[ "$#" -gt 0 ]]; do
+    case $1 in
+        --session-time) SESSION_TIME="$2"; shift ;;
+        --inter-session-time) INTER_SESSION_TIME="$2"; shift ;;
+        --iterations) ITERATIONS="$2"; shift ;;
+        # NEW arguments for baseline and training session time
+        --baseline-session-time) BASELINE_SESSION_TIME="$2"; shift ;;
+        --training-session-time) TRAINING_SESSION_TIME="$2"; shift ;;
+        *) echo "Unknown parameter passed: $1"; exit 1 ;;
+    esac
+    shift
+done
+
+
+# Function to activate the Conda environment
+activate_conda() {
+    echo "Activating conda environment 'daqcon'..." | tee -a "$SCRIPT_LOG"
+    source ~/miniconda3/bin/activate daqcon || { echo "Error: Failed to activate Conda environment 'daqcon'" | tee -a "$SCRIPT_LOG"; exit 1; }
+}
+
+# Function to run Python scripts
+run_python_scripts() {
+    echo "Running calc_path.py..." | tee -a "$SCRIPT_LOG"
+    python3 "$calc_path_exe" >> "$CALC_PATH_LOG" 2>&1 &
+    PIDS+=($!)
+    if [ $? -ne 0 ]; then
+        echo "Error: Failed to start calc_path.py" | tee -a "$SCRIPT_LOG"
+        exit 1
+    fi
+
+    echo "Running con_led.py..." | tee -a "$SCRIPT_LOG"
+    python3 "$con_led_exe" >> "$CON_LED_LOG" 2>&1 &
+    PIDS+=($!)
+    if [ $? -ne 0 ]; then
+        echo "Error: Failed to start con_led.py" | tee -a "$SCRIPT_LOG"
+        exit 1
+    fi
+}
+
+# Function to run FicTrac and Unity executables
+run_executables() {
+    local unity_exe=$1
+    local unity_log=$2
+    echo "Changing directory to $FICTRAC_WORKING_DIR" | tee -a "$SCRIPT_LOG"
+    cd "$FICTRAC_WORKING_DIR" || { echo "Directory $FICTRAC_WORKING_DIR not found" | tee -a "$SCRIPT_LOG"; exit 1; }
+
+    echo "Running fictrac..." | tee -a "$SCRIPT_LOG"
+    "$FICTRAC_EXE" "$FICTRAC_CONFIG" >> "$FICTRAC_LOG" 2>&1 &
+    PIDS+=($!)
+
+    echo "Switching back to $WORKING_DIR" | tee -a "$SCRIPT_LOG"
+    cd "$WORKING_DIR" || { echo "Directory $WORKING_DIR not found" | tee -a "$SCRIPT_LOG"; exit 1; }
+
+    echo "Running Unity executable: $unity_exe" | tee -a "$SCRIPT_LOG"
+    "$unity_exe" >> "$unity_log" 2>&1 &
+    PIDS+=($!)
+}
+
+# Countdown function for better user experience
+countdown() {
+    local duration=$1
+    while [ $duration -gt 0 ]; do
+        echo -ne "Time remaining: $duration seconds\r"
+        sleep 1
+        ((duration--))
+    done
+    echo ""
+}
+
+# Function to stop all running processes without exiting the script
+stop_processes() {
+    echo "Stopping all running processes..." | tee -a "$SCRIPT_LOG"
+    for pid in "${PIDS[@]}"; do
+        if kill -0 "$pid" 2>/dev/null; then
+            echo "Stopping process with PID $pid" | tee -a "$SCRIPT_LOG"
+            kill -9 "$pid" 2>/dev/null
+        fi
+    done
+    PIDS=()
+}
+
+# Baseline Session
+activate_conda
+run_python_scripts
+run_executables "$UNITY_BASELINE_EXE" "$UNITY_BASELINE_LOG"
+echo "Baseline session running for $BASELINE_SESSION_TIME seconds..." | tee -a "$SCRIPT_LOG"
+countdown "$BASELINE_SESSION_TIME"
+stop_processes
+
+echo "Waiting for $INTER_SESSION_TIME seconds before next session..." | tee -a "$SCRIPT_LOG"
+countdown "$INTER_SESSION_TIME"
+
+# Training and Probing Sessions
+for ((i=1; i<=ITERATIONS; i++)); do
+    echo "Starting iteration $i of $ITERATIONS: Training Session" | tee -a "$SCRIPT_LOG"
+    activate_conda
+    run_python_scripts
+    run_executables "$UNITY_EXPERIMENT_EXE" "$UNITY_EXPERIMENT_LOG"
+    echo "Training session running for $TRAINING_SESSION_TIME seconds..." | tee -a "$SCRIPT_LOG"
+    countdown "$TRAINING_SESSION_TIME"
+    stop_processes
+
+    echo "Waiting for $INTER_SESSION_TIME seconds before Probing Session..." | tee -a "$SCRIPT_LOG"
+    countdown "$INTER_SESSION_TIME"
+done
+
+echo "All iterations completed." | tee -a "$SCRIPT_LOG"
+cleanup
+
