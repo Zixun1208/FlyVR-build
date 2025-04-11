@@ -5,9 +5,32 @@ import warnings
 import argparse
 from time import sleep, time
 
+def parse_zone_decay_rates(zones_str):
+    """
+    Parses a string containing zone:decay_rate pairs separated by commas 
+    (e.g., "0:0.02,1:0.01") into a dictionary mapping int(zone) -> float(decay_rate).
+    """
+    zone_decay_rates = {}
+    for zone_pair in zones_str.split(','):
+        try:
+            zone, decay_rate = zone_pair.split(':')
+            zone_decay_rates[int(zone)] = float(decay_rate)
+        except ValueError:
+            logging.error(f"Invalid zone mapping format for '{zone_pair}'. Expected format zone:decay_rate")
+    return zone_decay_rates
+
 # Command-line argument parsing
-parser = argparse.ArgumentParser(description="UDP to DAQ control script with optional no-decay mode.")
-parser.add_argument("--no-decay", action="store_true", help="Disable frequency decay over time.")
+parser = argparse.ArgumentParser(
+    description="UDP to DAQ control script with zone-specific decay rates."
+)
+parser.add_argument(
+    "--zones",
+    type=str,
+    default="0:0.0,1:0.0",
+    help=("Comma-separated list of zone:decay_rate pairs (e.g., '0:0.02,1:0.01') "
+          "defining the decay rate for each zone. "
+          "If a zone is not found, a default decay rate of 0 (i.e. no decay) is used.")
+)
 args = parser.parse_args()
 
 # Configuration
@@ -15,30 +38,20 @@ DAQ_CHANNEL = "cDAQ1Mod1/port0/line0"
 UDP_IP = "127.0.0.1"
 UDP_PORT = 1319
 
-# Base parameters
 FLASH_FREQUENCY = 50.0  # Hz
-DEFAULT_SCALE = 0.01
-NO_DECAY = args.no_decay  # Set via command-line argument
 
-# Define scales for different zones
-ZONE_SCALES = {
-    0: 0.0055556,
-    1: 0.0027778,
-    # 2: 0.05,
-    # 3: 0.1,
-    # Add more zones if needed
-}
+# Parse zones argument into a dictionary mapping zone -> decay rate.
+ZONE_DECAY_RATES = parse_zone_decay_rates(args.zones)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 warnings.filterwarnings("ignore", category=UserWarning, module="nidaqmx")
 
 def udp_daq_control():
     """
-    Wait for a first incoming UDP packet. Once that happens,
-    consider the 'connection established' and begin processing
-    frames & toggling the DAQ line.
+    Wait for a first incoming UDP packet to establish a connection, then
+    process frames and toggle the DAQ line using zone-specific decay rates.
     """
-    # 1. Create a socket, bind, and wait for first packet
+    # Create and bind a UDP socket, then wait for the first packet.
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.bind((UDP_IP, UDP_PORT))
     logging.info(f"Socket bound on {UDP_IP}:{UDP_PORT}")
@@ -46,13 +59,11 @@ def udp_daq_control():
     logging.info("Waiting for a client to send any data to establish 'connection'...")
 
     connected = False
-    client_address = None
 
     while not connected:
         try:
             data, addr = sock.recvfrom(512)
             if data:
-                client_address = addr
                 logging.info(f"Connection established from {addr}")
                 connected = True
         except BlockingIOError:
@@ -79,6 +90,7 @@ def udp_daq_control():
                     frame_count = int(values[0])
                     zone = int(values[1])
                 except BlockingIOError:
+                    # No data available; continue handling flash timing
                     pass
                 except (ValueError, IndexError):
                     logging.warning(f"Invalid message received: {data}")
@@ -89,16 +101,12 @@ def udp_daq_control():
                 if zone == -1:
                     logging.info("Out of reward zone: setting digital output to LOW.")
                     task.write(False)
-
                 else:
-                    # Get the scale for the current zone
-                    scale = ZONE_SCALES.get(zone, DEFAULT_SCALE)
-
-                    if NO_DECAY:
-                        new_flash_freq = FLASH_FREQUENCY  # No decay, keep frequency constant
-                    else:
-                        new_flash_freq = FLASH_FREQUENCY - (scale * frame_count)
-                        new_flash_freq = max(new_flash_freq, 0)
+                    # Look up the zone-specific decay rate; if not provided, default to 0 (no decay).
+                    zone_decay = ZONE_DECAY_RATES.get(zone, 0)
+                    # Calculate the new frequency by decaying the base frequency by zone_decay * frame_count.
+                    new_flash_freq = FLASH_FREQUENCY - (zone_decay * frame_count)
+                    new_flash_freq = max(new_flash_freq, 0)
 
                     if new_flash_freq == 0:
                         if output_state:
@@ -114,7 +122,7 @@ def udp_daq_control():
                             logging.info(
                                 f"In reward zone (frame_count={frame_count}, zone={zone}): "
                                 f"flashing {'HIGH' if output_state else 'LOW'} at ~{new_flash_freq:.2f} Hz "
-                                f"using scale={scale}."
+                                f"with zone decay rate {zone_decay}."
                             )
                             task.write(output_state)
                             next_flash_time = current_time + flash_interval

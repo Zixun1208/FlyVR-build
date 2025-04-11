@@ -1,0 +1,14 @@
+{
+  "bash_script": "/home/kazama/Experiment_builds/turning_foraging/run_experiment.sh",
+  "unity_exe": "/home/kazama/Unity_Builds/turning_foraging/turning_foraging.x86_64",
+  "fictrac_exe": "/home/kazama/fictrac/bin/fictrac",
+  "fictrac_config": "/home/kazama/fictrac/fictrac_config/config.txt",
+  "calc_path_py": "/home/kazama/Experiment_builds/turning_foraging/calc_path_closed_end.py",
+  "con_led_py": "/home/kazama/Experiment_builds/turning_foraging/con_led.py",
+  "working_dir": "/home/kazama/Experiment_log",
+  "csv_main_dir": "/home/kazama/Raw_data/foraging",
+  "baseline_time": "300",
+  "training_time": "300",
+  "iterations": "60",
+  "inter_session_time": "10"
+}
